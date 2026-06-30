@@ -314,12 +314,16 @@ def _prepare_krea2_text_batch(pair_sections, clip_model):
     max_width = 0
     nonunit = 0
     negative = 0
+    image_positions: set[int] = set()
 
     for section in pair_sections:
-        token_rows.append([entry[0] for entry in section])
+        row = [entry[0] for entry in section]
+        token_rows.append(row)
         max_width = max(max_width, len(section))
-        for entry in section:
+        for i, entry in enumerate(section):
             weight = _pair_weight(entry)
+            if isinstance(row[i], dict) and row[i].get("type") == "image":
+                image_positions.add(i)
             if weight is None or weight == 1.0:
                 continue
             nonunit += 1
@@ -327,7 +331,19 @@ def _prepare_krea2_text_batch(pair_sections, clip_model):
 
     needs_reference_row = nonunit > 0 or len(token_rows) == 0
     if needs_reference_row:
-        token_rows.append(_krea2_empty_tokens(clip_model, max_width))
+        if image_positions:
+            # Preserve image entries in the reference row so that
+            # the encoded sequence length matches across the batch.
+            reference = _krea2_empty_tokens(clip_model, max_width)
+            for pos in sorted(image_positions):
+                if pos < len(reference):
+                    for row in token_rows:
+                        if pos < len(row) and isinstance(row[pos], dict) and row[pos].get("type") == "image":
+                            reference[pos] = row[pos]
+                            break
+            token_rows.append(reference)
+        else:
+            token_rows.append(_krea2_empty_tokens(clip_model, max_width))
 
     return TextBatchPlan(
         rows=token_rows,
