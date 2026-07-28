@@ -1168,11 +1168,11 @@ def _restore_runtime_model_patches(dm: Any):
             _restore_block_runtime_cfg(block)
 
 
-def krea2_negpip_wrapper(executor, x, timesteps, context, attention_mask=None, transformer_options=None, **kwargs):
+def krea2_negpip_wrapper(executor, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options=None, **kwargs):
     transformer_options = transformer_options or {}
     cfg = transformer_options.get(WRAPPER_KEY, {})
     if not cfg or not cfg.get("enabled", True):
-        return executor(x, timesteps, context, attention_mask, transformer_options, **kwargs)
+        return executor(x, timesteps, context, attention_mask, ref_latents, transformer_options, **kwargs)
 
     dm = executor.class_obj
     if not _is_krea2_dm(dm):
@@ -1180,7 +1180,7 @@ def krea2_negpip_wrapper(executor, x, timesteps, context, attention_mask=None, t
         attention_mask = _strip_mask_with_indices(attention_mask, keep_indices, context.shape[1])
         if negative_positions is not None:
             raise RuntimeError("Krea2 NegPiP conditioning was connected to a non-Krea2 diffusion model.")
-        return executor(x, timesteps, context_without_sidecar, attention_mask, transformer_options, **kwargs)
+        return executor(x, timesteps, context_without_sidecar, attention_mask, ref_latents, transformer_options, **kwargs)
 
     original_context_len = context.shape[1]
     context, negative_positions, keep_indices = _parse_and_strip_sidecar_full(context)
@@ -1188,7 +1188,7 @@ def krea2_negpip_wrapper(executor, x, timesteps, context, attention_mask=None, t
     if negative_positions is None:
         metadata_fallback = _negative_metadata_from_transformer_options(transformer_options, context.shape[1])
         if metadata_fallback is None:
-            return executor(x, timesteps, context, attention_mask, transformer_options, **kwargs)
+            return executor(x, timesteps, context, attention_mask, ref_latents, transformer_options, **kwargs)
         negative_positions, trim_to_length = metadata_fallback
         if trim_to_length is not None and trim_to_length < int(context.shape[1]):
             context = context[:, :trim_to_length, :]
@@ -1198,7 +1198,7 @@ def krea2_negpip_wrapper(executor, x, timesteps, context, attention_mask=None, t
     total_neg = sum(len(r) for r in negative_positions)
     value_strength = _bounded_float(cfg.get("value_strength", 1.0), 1.0, 0.0, 8.0)
     if total_neg == 0 or value_strength == 0.0:
-        return executor(x, timesteps, context, attention_mask, transformer_options, **kwargs)
+        return executor(x, timesteps, context, attention_mask, ref_latents, transformer_options, **kwargs)
 
     # Keep the original transformer_options shape but install a per-call active cfg.
     # The temporary block/wv forward wrappers read this and are restored after this call.
@@ -1212,7 +1212,7 @@ def krea2_negpip_wrapper(executor, x, timesteps, context, attention_mask=None, t
 
     try:
         _install_runtime_model_patches(dm, active_cfg)
-        return executor(x, timesteps, context, attention_mask, new_transformer_options, **kwargs)
+        return executor(x, timesteps, context, attention_mask, ref_latents, new_transformer_options, **kwargs)
     finally:
         _restore_runtime_model_patches(dm)
 
