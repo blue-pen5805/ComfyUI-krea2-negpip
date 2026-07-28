@@ -386,6 +386,33 @@ def _prepare_krea2_text_batch(pair_sections, clip_model):
     )
 
 
+def _rows_have_embeds(rows) -> bool:
+    return any(not _is_plain_int_token(token) for row in rows for token in row)
+
+
+def _encode_krea2_rows(clip_model, rows):
+    if len(rows) <= 1 or not _rows_have_embeds(rows):
+        return clip_model.encode(rows)
+
+    encoded_rows = [clip_model.encode([row]) for row in rows]
+    context = torch.cat([encoded[0] for encoded in encoded_rows], dim=0)
+
+    pooled_rows = [encoded[1] for encoded in encoded_rows]
+    pooled = torch.cat(pooled_rows, dim=0) if all(torch.is_tensor(row) for row in pooled_rows) else pooled_rows[0]
+
+    extra_rows = [encoded[2] if len(encoded) > 2 and isinstance(encoded[2], dict) else None for encoded in encoded_rows]
+    if not any(extra is not None for extra in extra_rows):
+        return context, pooled
+
+    extra = dict(next(extra for extra in extra_rows if extra is not None))
+    masks = [row.get("attention_mask") if row is not None else None for row in extra_rows]
+    if all(torch.is_tensor(mask) for mask in masks):
+        extra["attention_mask"] = torch.cat(masks, dim=0)
+    else:
+        extra.pop("attention_mask", None)
+    return context, pooled, extra
+
+
 def _flatten_krea2_taps(tensor: torch.Tensor) -> torch.Tensor:
     batch, layers, seq_len, width = tensor.shape
     return tensor.permute(0, 2, 1, 3).reshape(batch, seq_len, layers * width)
@@ -530,7 +557,7 @@ def _make_krea2_negpip_encode_token_weights(cond_stage_model):
         clip_model = getattr(cond_stage_model, KREA2_TEXT_ENCODER_KEY)
         pairs = token_weight_pairs[KREA2_TEXT_ENCODER_KEY]
         plan = _prepare_krea2_text_batch(pairs, clip_model)
-        encoded = clip_model.encode(plan.rows)
+        encoded = _encode_krea2_rows(clip_model, plan.rows)
         pooled = encoded[1]
         first_pooled = _intermediate(pooled[0:1]) if pooled is not None else None
         cond, negative_positions, source_length = _build_krea2_conditioning(
@@ -1285,11 +1312,18 @@ class ApplyKrea2NegPiP:
         diffusion_wrappers = wrappers.get(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, {})
         diffusion_wrappers.pop(WRAPPER_KEY, None)
 
-        patched.add_wrapper_with_key(
+        comfy.patcher_extension.add_wrapper_with_key(
             comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
             WRAPPER_KEY,
             krea2_negpip_wrapper,
+            to,
         )
+        diffusion_wrappers = to["wrappers"][comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL]
+        negpip_wrapper = diffusion_wrappers.pop(WRAPPER_KEY)
+        to["wrappers"][comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL] = {
+            WRAPPER_KEY: negpip_wrapper,
+            **diffusion_wrappers,
+        }
 
         return patched, new_clip
 
